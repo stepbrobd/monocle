@@ -17,6 +17,7 @@ use commands::inspect::InspectArgs;
 use commands::ip::IpArgs;
 use commands::parse::ParseArgs;
 use commands::pfx2as::Pfx2asArgs;
+use commands::rib::RibArgs;
 use commands::rpki::RpkiCommands;
 use commands::search::SearchArgs;
 use commands::time::TimeArgs;
@@ -56,6 +57,9 @@ enum Commands {
 
     /// Search BGP messages from all available public MRT files.
     Search(SearchArgs),
+
+    /// Reconstruct final RIB state at one or more arbitrary timestamps.
+    Rib(RibArgs),
 
     /// Start the WebSocket server (ws://<address>:<port>/ws, health: http://<address>:<port>/health)
     ///
@@ -176,6 +180,9 @@ fn main() {
     match cli.command {
         Commands::Parse(args) => commands::parse::run(args, streaming_output_format),
         Commands::Search(args) => commands::search::run(&config, args, streaming_output_format),
+        Commands::Rib(args) => {
+            commands::rib::run(&config, args, streaming_output_format, cli.no_update)
+        }
 
         Commands::Server(args) => {
             // The server requires the `server` feature (axum + tokio). Keep the CLI

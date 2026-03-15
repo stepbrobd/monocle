@@ -21,6 +21,7 @@ See through all Border Gateway Protocol (BGP) data with a monocle.
   - [`monocle parse`](#monocle-parse)
     - [Output Format](#output-format)
   - [`monocle search`](#monocle-search)
+  - [`monocle rib`](#monocle-rib)
   - [`monocle time`](#monocle-time)
   - [`monocle inspect`](#monocle-inspect)
   - [`monocle country`](#monocle-country)
@@ -229,6 +230,7 @@ Subcommands:
 
 - `parse`: parse individual MRT files
 - `search`: search for matching messages from all available public MRT files
+- `rib`: reconstruct final RIB state at one or more arbitrary timestamps
 - `server`: start a WebSocket server for programmatic access
 - `inspect`: unified AS and prefix information lookup
 - `country`: utility to look up country name and code
@@ -259,6 +261,7 @@ Usage: monocle [OPTIONS] <COMMAND>
 Commands:
   parse    Parse individual MRT files given a file path, local or remote
   search   Search BGP messages from all available public MRT files
+  rib      Reconstruct final RIB state at one or more arbitrary timestamps
   server   Start the WebSocket server (ws://<address>:<port>/ws, health: http://<address>:<port>/health)
   inspect  Unified AS and prefix information lookup
   country  Country name and code lookup utilities
@@ -699,6 +702,64 @@ Use `--broker-files` to see the list of MRT files that would be queried without 
 ```text
 ➜  monocle search -t 2024-01-01T00:00:00Z -T 2024-01-01T01:00:00Z \
     -c rrc00 --broker-files
+```
+
+### `monocle rib`
+
+Reconstruct final RIB state at one or more arbitrary timestamps by loading the latest RIB at or before each requested `rib_ts` and replaying updates up to the exact timestamp.
+
+```text
+➜  monocle rib --help
+Reconstruct final RIB state at one or more arbitrary timestamps
+
+Usage: monocle rib [OPTIONS] --ts <RIB_TS>
+
+Options:
+      --ts <RIB_TS>                Target RIB timestamp. Repeat to request multiple snapshots
+      --debug                      Print debug information
+  -o, --origin-asn <ORIGIN_ASN>    Filter by origin AS Number(s), comma-separated. Prefix with ! to exclude
+  -C, --country <COUNTRY>          Filter by origin ASN registration country
+      --format <FORMAT>            Output format: table, markdown, json, json-pretty, json-line, psv (default varies by command)
+      --json                       Output as JSON objects (shortcut for --format json-pretty)
+  -p, --prefix <PREFIX>            Filter by network prefix(es), comma-separated. Prefix with ! to exclude
+      --no-update                  Disable automatic database updates (use existing cached data only)
+  -s, --include-super              Include super-prefixes when filtering
+  -S, --include-sub                Include sub-prefixes when filtering
+  -J, --peer-asn <PEER_ASN>        Filter by peer ASN(s), comma-separated. Prefix with ! to exclude
+  -a, --as-path <AS_PATH>          Filter by AS path regex string
+  -c, --collector <COLLECTOR>      Filter by collector, e.g., rrc00 or route-views2
+  -P, --project <PROJECT>          Filter by route collection project, i.e. riperis or routeviews
+      --full-feed-only             Keep only full-feed peers based on broker peer metadata
+      --output-type <OUTPUT_TYPE>  File output type. If omitted and `--output-dir` is also omitted, output goes to stdout [possible values: sqlite]
+      --output-dir <OUTPUT_DIR>    Output directory for generated SQLite files
+  -h, --help                       Print help
+  -V, --version                    Print version
+```
+
+Behavior:
+
+- A single `--ts` writes to stdout by default.
+- Repeated `--ts` values require file output and are written to one merged SQLite file keyed by `rib_ts`.
+- If any selected collector has no RIB at or before a requested `rib_ts`, the command aborts instead of producing a partial result.
+- `--country` uses local ASInfo registration data, and `--full-feed-only` keeps only peers with at least 800k IPv4 prefixes or 100k IPv6 prefixes in broker peer metadata.
+
+Examples:
+
+```bash
+# Print the reconstructed RIB for a single timestamp to stdout
+monocle rib --ts 2025-09-01T12:00:00Z -c rrc00 -o 13335
+
+# Write multiple timestamps to one merged SQLite file in the current directory
+monocle rib \
+  --ts 2025-09-01T12:00:00Z \
+  --ts 2025-09-01T18:00:00Z \
+  --output-type sqlite \
+  -c rrc00 \
+  --country US \
+  --full-feed-only
+
+# Override the output directory
+monocle rib --ts 2025-09-01T12:00:00Z --output-dir /tmp/rib-out -c route-views2
 ```
 
 ### `monocle time`

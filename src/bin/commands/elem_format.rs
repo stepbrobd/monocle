@@ -17,7 +17,9 @@ pub const AVAILABLE_FIELDS: &[&str] = &[
     "peer_ip",
     "peer_asn",
     "prefix",
+    "path_id",
     "as_path",
+    "origin_asns",
     "origin",
     "next_hop",
     "local_pref",
@@ -174,10 +176,25 @@ pub fn get_field_value_with_time_format(
         "peer_ip" => elem.peer_ip.to_string(),
         "peer_asn" => elem.peer_asn.to_string(),
         "prefix" => elem.prefix.to_string(),
+        "path_id" => elem
+            .prefix
+            .path_id
+            .map(|path_id| path_id.to_string())
+            .unwrap_or_default(),
         "as_path" => elem
             .as_path
             .as_ref()
             .map(|p| p.to_string())
+            .unwrap_or_default(),
+        "origin_asns" => elem
+            .origin_asns
+            .as_ref()
+            .map(|asns| {
+                asns.iter()
+                    .map(|asn| asn.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
             .unwrap_or_default(),
         "origin" => elem
             .origin
@@ -288,8 +305,16 @@ pub fn build_json_object(
             "peer_ip" => json!(elem.peer_ip.to_string()),
             "peer_asn" => json!(elem.peer_asn),
             "prefix" => json!(elem.prefix.to_string()),
+            "path_id" => match elem.prefix.path_id {
+                Some(path_id) => json!(path_id),
+                None => serde_json::Value::Null,
+            },
             "as_path" => match &elem.as_path {
                 Some(p) => json!(p.to_string()),
+                None => serde_json::Value::Null,
+            },
+            "origin_asns" => match &elem.origin_asns {
+                Some(asns) => json!(asns.iter().map(|asn| asn.to_string()).collect::<Vec<_>>()),
                 None => serde_json::Value::Null,
             },
             "origin" => match &elem.origin {

@@ -88,6 +88,7 @@ lib = [
     # Database
     "dep:oneio",
     "dep:ipnet",
+    "dep:tempfile",
     # Lenses
     "dep:chrono-humanize",
     "dep:dateparser",
@@ -98,6 +99,7 @@ lib = [
     "dep:itertools",
     "dep:radar-rs",
     "dep:rayon",
+    "dep:regex",
     # Display (always included with lib)
     "dep:tabled",
     "dep:json_to_table",
@@ -151,6 +153,7 @@ tracing = "0.1"
 # Database
 ipnet = { version = "2.10", features = ["json"], optional = true }
 oneio = { version = "0.20.1", default-features = false, features = ["https", "gz", "bz", "json"], optional = true }
+tempfile = { version = "3", optional = true }
 
 # Lenses
 chrono-humanize = { version = "0.2", optional = true }
@@ -162,6 +165,7 @@ bgpkit-commons = { version = "0.10.2", features = ["asinfo", "rpki", "countries"
 itertools = { version = "0.14", optional = true }
 radar-rs = { version = "0.1.0", optional = true }
 rayon = { version = "1.8", optional = true }
+regex = { version = "1.11", optional = true }
 
 # Display
 tabled = { version = "0.20", optional = true }

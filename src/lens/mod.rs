@@ -78,6 +78,10 @@ pub mod parse;
 #[cfg(feature = "lib")]
 pub mod search;
 
+// RibLens - arbitrary timestamp RIB reconstruction
+#[cfg(feature = "lib")]
+pub mod rib;
+
 // RpkiLens - RPKI validation and data
 #[cfg(feature = "lib")]
 pub mod rpki;
