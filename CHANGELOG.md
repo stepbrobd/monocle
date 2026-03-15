@@ -9,7 +9,7 @@ All notable changes to this project will be documented in this file.
 * Added `monocle rib` for reconstructing RIB state at arbitrary timestamps
   * Selects the latest RIB before each requested `rib_ts` and replays updates to the exact timestamp
   * Supports stdout output by default and SQLite output via `--sqlite-path`
-  * Repeated `--ts` values require `--sqlite-path` and are written to one merged SQLite file keyed by `rib_ts`
+  * Repeated timestamp operands require `--sqlite-path` and are written to one merged SQLite file keyed by `rib_ts`
   * Aborts when no RIB exists at or before a requested `rib_ts` for a selected collector
   * Supports `--country`, `--origin-asn`, `--prefix`, `--as-path`, `--peer-asn`, `--collector`, `--project`, and `--full-feed-only`
 

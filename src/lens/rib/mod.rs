@@ -35,11 +35,6 @@ type FullFeedAllowlists = HashMap<String, HashSet<(String, u32)>>;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "cli", derive(Args))]
 pub struct RibFilters {
-    /// Target RIB timestamp. Repeat to request multiple snapshots.
-    #[cfg_attr(feature = "cli", clap(long = "ts", required = true))]
-    #[serde(default)]
-    pub rib_ts: Vec<String>,
-
     /// Filter by origin AS Number(s), comma-separated. Prefix with ! to exclude.
     #[cfg_attr(feature = "cli", clap(short = 'o', long, value_delimiter = ','))]
     #[serde(default)]
@@ -90,6 +85,11 @@ pub struct RibFilters {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "cli", derive(Args))]
 pub struct RibArgs {
+    /// Target RIB timestamp operand. Repeat to request multiple snapshots.
+    #[cfg_attr(feature = "cli", clap(value_name = "RIB_TS", required = true))]
+    #[serde(default)]
+    pub rib_ts: Vec<String>,
+
     #[cfg_attr(feature = "cli", clap(flatten))]
     #[serde(flatten)]
     pub filters: RibFilters,
@@ -104,16 +104,16 @@ impl RibArgs {
         let time_lens = TimeLens::new();
         let mut timestamps = BTreeSet::new();
 
-        for value in &self.filters.rib_ts {
+        for value in &self.rib_ts {
             let ts = time_lens
                 .parse_time_string(value)
-                .map_err(|e| anyhow!("Invalid --ts value '{}': {}", value, e))?
+                .map_err(|e| anyhow!("Invalid RIB timestamp '{}': {}", value, e))?
                 .timestamp();
             timestamps.insert(ts);
         }
 
         if timestamps.is_empty() {
-            return Err(anyhow!("At least one --ts value is required"));
+            return Err(anyhow!("At least one RIB timestamp is required"));
         }
 
         Ok(timestamps.into_iter().collect())
@@ -139,7 +139,7 @@ impl RibArgs {
         }
 
         if normalized_ts.len() > 1 && self.sqlite_path.is_none() {
-            return Err(anyhow!("Multiple --ts values require --sqlite-path."));
+            return Err(anyhow!("Multiple RIB timestamps require --sqlite-path."));
         }
 
         Ok(normalized_ts)
@@ -1021,8 +1021,8 @@ mod tests {
 
     fn base_args() -> RibArgs {
         RibArgs {
+            rib_ts: vec!["2025-09-01T12:00:00Z".to_string()],
             filters: RibFilters {
-                rib_ts: vec!["2025-09-01T12:00:00Z".to_string()],
                 ..Default::default()
             },
             sqlite_path: None,
@@ -1032,14 +1032,14 @@ mod tests {
     #[test]
     fn test_validate_multi_ts_stdout_error() {
         let mut args = base_args();
-        args.filters.rib_ts.push("2025-09-01T13:00:00Z".to_string());
+        args.rib_ts.push("2025-09-01T13:00:00Z".to_string());
         assert!(args.validate().is_err());
     }
 
     #[test]
     fn test_validate_multi_ts_file_output_ok() -> Result<()> {
         let mut args = base_args();
-        args.filters.rib_ts.push("2025-09-01T13:00:00Z".to_string());
+        args.rib_ts.push("2025-09-01T13:00:00Z".to_string());
         args.sqlite_path = Some(PathBuf::from("/tmp/monocle-rib.sqlite3"));
         let values = args.validate()?;
         assert_eq!(values.len(), 2);

@@ -712,18 +712,20 @@ Reconstruct final RIB state at one or more arbitrary timestamps by loading the l
 ➜  monocle rib --help
 Reconstruct final RIB state at one or more arbitrary timestamps
 
-Usage: monocle rib [OPTIONS] --ts <RIB_TS>
+Usage: monocle rib [OPTIONS] <RIB_TS>...
+
+Arguments:
+  <RIB_TS>...  Target RIB timestamp operand. Repeat to request multiple snapshots
 
 Options:
-      --ts <RIB_TS>                Target RIB timestamp. Repeat to request multiple snapshots
-      --debug                      Print debug information
   -o, --origin-asn <ORIGIN_ASN>    Filter by origin AS Number(s), comma-separated. Prefix with ! to exclude
   -C, --country <COUNTRY>          Filter by origin ASN registration country
+      --debug                      Print debug information
       --format <FORMAT>            Output format: table, markdown, json, json-pretty, json-line, psv (default varies by command)
-      --json                       Output as JSON objects (shortcut for --format json-pretty)
   -p, --prefix <PREFIX>            Filter by network prefix(es), comma-separated. Prefix with ! to exclude
-      --no-update                  Disable automatic database updates (use existing cached data only)
+      --json                       Output as JSON objects (shortcut for --format json-pretty)
   -s, --include-super              Include super-prefixes when filtering
+      --no-update                  Disable automatic database updates (use existing cached data only)
   -S, --include-sub                Include sub-prefixes when filtering
   -J, --peer-asn <PEER_ASN>        Filter by peer ASN(s), comma-separated. Prefix with ! to exclude
   -a, --as-path <AS_PATH>          Filter by AS path regex string
@@ -737,8 +739,8 @@ Options:
 
 Behavior:
 
-- A single `--ts` writes to stdout by default.
-- Repeated `--ts` values require `--sqlite-path` and are written to one merged SQLite file keyed by `rib_ts`.
+- A single timestamp operand writes to stdout by default.
+- Repeated timestamp operands require `--sqlite-path` and are written to one merged SQLite file keyed by `rib_ts`.
 - Providing `--sqlite-path` writes the reconstructed results to that SQLite file instead of stdout.
 - If any selected collector has no RIB at or before a requested `rib_ts`, the command aborts instead of producing a partial result.
 - `--country` uses local ASInfo registration data, and `--full-feed-only` keeps only peers with at least 800k IPv4 prefixes or 100k IPv6 prefixes in broker peer metadata.
@@ -747,19 +749,19 @@ Examples:
 
 ```bash
 # Print the reconstructed RIB for a single timestamp to stdout
-monocle rib --ts 2025-09-01T12:00:00Z -c rrc00 -o 13335
+monocle rib 2025-09-01T12:00:00Z -c rrc00 -o 13335
 
 # Write multiple timestamps to one merged SQLite file in the current directory
 monocle rib \
-  --ts 2025-09-01T12:00:00Z \
-  --ts 2025-09-01T18:00:00Z \
+  2025-09-01T12:00:00Z \
+  2025-09-01T18:00:00Z \
   --sqlite-path /tmp/rrc00-us.sqlite3 \
   -c rrc00 \
   --country US \
   --full-feed-only
 
 # Write a single reconstructed snapshot to SQLite
-monocle rib --ts 2025-09-01T12:00:00Z --sqlite-path /tmp/route-views2.sqlite3 -c route-views2
+monocle rib 2025-09-01T12:00:00Z --sqlite-path /tmp/route-views2.sqlite3 -c route-views2
 ```
 
 ### `monocle time`
