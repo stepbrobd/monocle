@@ -730,8 +730,7 @@ Options:
   -c, --collector <COLLECTOR>      Filter by collector, e.g., rrc00 or route-views2
   -P, --project <PROJECT>          Filter by route collection project, i.e. riperis or routeviews
       --full-feed-only             Keep only full-feed peers based on broker peer metadata
-      --output-type <OUTPUT_TYPE>  File output type. If omitted and `--output-dir` is also omitted, output goes to stdout [possible values: sqlite]
-      --output-dir <OUTPUT_DIR>    Output directory for generated SQLite files
+      --sqlite-path <SQLITE_PATH>  SQLite output file path
   -h, --help                       Print help
   -V, --version                    Print version
 ```
@@ -739,7 +738,8 @@ Options:
 Behavior:
 
 - A single `--ts` writes to stdout by default.
-- Repeated `--ts` values require file output and are written to one merged SQLite file keyed by `rib_ts`.
+- Repeated `--ts` values require `--sqlite-path` and are written to one merged SQLite file keyed by `rib_ts`.
+- Providing `--sqlite-path` writes the reconstructed results to that SQLite file instead of stdout.
 - If any selected collector has no RIB at or before a requested `rib_ts`, the command aborts instead of producing a partial result.
 - `--country` uses local ASInfo registration data, and `--full-feed-only` keeps only peers with at least 800k IPv4 prefixes or 100k IPv6 prefixes in broker peer metadata.
 
@@ -753,13 +753,13 @@ monocle rib --ts 2025-09-01T12:00:00Z -c rrc00 -o 13335
 monocle rib \
   --ts 2025-09-01T12:00:00Z \
   --ts 2025-09-01T18:00:00Z \
-  --output-type sqlite \
+  --sqlite-path /tmp/rrc00-us.sqlite3 \
   -c rrc00 \
   --country US \
   --full-feed-only
 
-# Override the output directory
-monocle rib --ts 2025-09-01T12:00:00Z --output-dir /tmp/rib-out -c route-views2
+# Write a single reconstructed snapshot to SQLite
+monocle rib --ts 2025-09-01T12:00:00Z --sqlite-path /tmp/route-views2.sqlite3 -c route-views2
 ```
 
 ### `monocle time`

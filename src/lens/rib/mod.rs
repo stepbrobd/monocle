@@ -6,6 +6,7 @@
 //! 3. Materializing only the final route state for each requested `rib_ts`
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use bgpkit_broker::{BgpkitBroker, BrokerItem};
@@ -22,7 +23,7 @@ use crate::lens::parse::ParseFilters;
 use crate::lens::time::TimeLens;
 
 #[cfg(feature = "cli")]
-use clap::{Args, ValueEnum};
+use clap::Args;
 
 const FULL_FEED_V4_THRESHOLD: u32 = 800_000;
 const FULL_FEED_V6_THRESHOLD: u32 = 100_000;
@@ -30,12 +31,6 @@ const RIB_LOOKBACK_HOURS: i64 = 24 * 30;
 const UPDATES_LOOKAHEAD_HOURS: i64 = 2;
 
 type FullFeedAllowlists = HashMap<String, HashSet<(String, u32)>>;
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "cli", derive(ValueEnum))]
-pub enum RibOutputType {
-    Sqlite,
-}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "cli", derive(Args))]
@@ -99,13 +94,9 @@ pub struct RibArgs {
     #[serde(flatten)]
     pub filters: RibFilters,
 
-    /// File output type. If omitted and `--output-dir` is also omitted, output goes to stdout.
-    #[cfg_attr(feature = "cli", clap(long, value_enum))]
-    pub output_type: Option<RibOutputType>,
-
-    /// Output directory for generated SQLite files.
+    /// SQLite output file path.
     #[cfg_attr(feature = "cli", clap(long))]
-    pub output_dir: Option<String>,
+    pub sqlite_path: Option<PathBuf>,
 }
 
 impl RibArgs {
@@ -128,14 +119,6 @@ impl RibArgs {
         Ok(timestamps.into_iter().collect())
     }
 
-    pub fn file_output_type(&self) -> Option<RibOutputType> {
-        match (self.output_type, self.output_dir.is_some()) {
-            (Some(output_type), _) => Some(output_type),
-            (None, true) => Some(RibOutputType::Sqlite),
-            (None, false) => None,
-        }
-    }
-
     pub fn validate(&self) -> Result<Vec<i64>> {
         let normalized_ts = self.normalized_rib_ts()?;
 
@@ -155,10 +138,8 @@ impl RibArgs {
                 .map_err(|e| anyhow!("Invalid --as-path regex '{}': {}", as_path, e))?;
         }
 
-        if normalized_ts.len() > 1 && self.file_output_type().is_none() {
-            return Err(anyhow!(
-                "Multiple --ts values require file output. Use --output-type and optionally --output-dir."
-            ));
+        if normalized_ts.len() > 1 && self.sqlite_path.is_none() {
+            return Err(anyhow!("Multiple --ts values require --sqlite-path."));
         }
 
         Ok(normalized_ts)
@@ -323,20 +304,6 @@ impl<'a> RibLens<'a> {
         })
     }
 
-    pub fn output_directory(&self, args: &RibArgs) -> Result<Option<std::path::PathBuf>> {
-        match args.file_output_type() {
-            None => Ok(None),
-            Some(_) => {
-                let dir = match &args.output_dir {
-                    Some(path) => std::path::PathBuf::from(path),
-                    None => std::env::current_dir()
-                        .map_err(|e| anyhow!("Failed to determine current directory: {}", e))?,
-                };
-                Ok(Some(dir))
-            }
-        }
-    }
-
     pub fn file_name_prefix(&self, args: &RibArgs, rib_ts: &[i64]) -> Result<String> {
         let base = if rib_ts.len() == 1 {
             format!(
@@ -365,19 +332,6 @@ impl<'a> RibLens<'a> {
         } else {
             Ok(format!("{}-{}", base, slug))
         }
-    }
-
-    pub fn single_snapshot_file_name(
-        &self,
-        args: &RibArgs,
-        rib_ts: i64,
-        output_type: RibOutputType,
-    ) -> Result<String> {
-        let prefix = self.file_name_prefix(args, &[rib_ts])?;
-        let ext = match output_type {
-            RibOutputType::Sqlite => "sqlite3",
-        };
-        Ok(format!("{}.{}", prefix, ext))
     }
 
     fn resolve_country_asns(
@@ -1071,8 +1025,7 @@ mod tests {
                 rib_ts: vec!["2025-09-01T12:00:00Z".to_string()],
                 ..Default::default()
             },
-            output_type: None,
-            output_dir: None,
+            sqlite_path: None,
         }
     }
 
@@ -1087,7 +1040,7 @@ mod tests {
     fn test_validate_multi_ts_file_output_ok() -> Result<()> {
         let mut args = base_args();
         args.filters.rib_ts.push("2025-09-01T13:00:00Z".to_string());
-        args.output_type = Some(RibOutputType::Sqlite);
+        args.sqlite_path = Some(PathBuf::from("/tmp/monocle-rib.sqlite3"));
         let values = args.validate()?;
         assert_eq!(values.len(), 2);
         Ok(())
@@ -1122,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn test_single_snapshot_file_name_includes_filters() -> Result<()> {
+    fn test_file_name_prefix_includes_filters() -> Result<()> {
         let mut args = base_args();
         args.filters.country = Some("US".to_string());
         args.filters.origin_asn = vec!["13335".to_string()];
@@ -1131,8 +1084,10 @@ mod tests {
         let db = MonocleDatabase::open_in_memory()?;
         let config = MonocleConfig::default();
         let lens = RibLens::new(&db, &config);
-        let file_name =
-            lens.single_snapshot_file_name(&args, 1_756_728_000, RibOutputType::Sqlite)?;
+        let file_name = format!(
+            "{}.sqlite3",
+            lens.file_name_prefix(&args, &[1_756_728_000])?
+        );
 
         assert_eq!(
             file_name,
