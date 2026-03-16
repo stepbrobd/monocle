@@ -1,37 +1,28 @@
 use std::fs;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
-use bgpkit_parser::BgpElem;
-
-use monocle::database::{MonocleDatabase, RibSqliteStore};
+use monocle::database::{MonocleDatabase, RibSqliteStore, StoredRibEntry};
 use monocle::lens::rib::RibLens;
 use monocle::utils::{OutputFormat, TimestampFormat};
 use monocle::MonocleConfig;
+use serde_json::json;
+use tabled::builder::Builder;
+use tabled::settings::Style;
 
-use super::elem_format::{format_elem, format_elems_table, get_header};
+use super::elem_format::get_header;
 
 pub use monocle::lens::rib::RibArgs;
 
 const DEFAULT_FIELDS_RIB: &[&str] = &[
-    "type",
+    "collector",
     "timestamp",
     "peer_ip",
     "peer_asn",
     "prefix",
-    "path_id",
     "as_path",
     "origin_asns",
-    "origin",
-    "next_hop",
-    "local_pref",
-    "med",
-    "communities",
-    "atomic",
-    "aggr_asn",
-    "aggr_ip",
-    "collector",
 ];
 
 pub fn run(config: &MonocleConfig, args: RibArgs, output_format: OutputFormat, no_update: bool) {
@@ -65,22 +56,23 @@ fn run_stdout(
     output_format: OutputFormat,
     no_update: bool,
 ) -> Result<()> {
-    let mut stdout = std::io::stdout();
+    let stdout = std::io::stdout();
+    let mut stdout = BufWriter::new(stdout.lock());
 
     if output_format == OutputFormat::Table {
-        let mut elems = Vec::<(BgpElem, Option<String>)>::new();
+        let mut entries = Vec::<StoredRibEntry>::new();
         lens.reconstruct_snapshots(args, no_update, |_rib_ts, state_store| {
             state_store.visit_entries(|entry| {
-                elems.push((entry.elem, Some(entry.collector)));
+                entries.push(entry.clone());
                 Ok(())
             })
         })?;
 
-        if !elems.is_empty() {
+        if !entries.is_empty() {
             writeln!(
                 stdout,
                 "{}",
-                format_elems_table(&elems, DEFAULT_FIELDS_RIB, TimestampFormat::Unix)
+                format_entries_table(&entries, DEFAULT_FIELDS_RIB)
             )
             .map_err(|e| anyhow!("Failed to write table output: {}", e))?;
         }
@@ -98,13 +90,7 @@ fn run_stdout(
         }
 
         state_store.visit_entries(|entry| {
-            if let Some(line) = format_elem(
-                &entry.elem,
-                output_format,
-                DEFAULT_FIELDS_RIB,
-                Some(entry.collector.as_str()),
-                TimestampFormat::Unix,
-            ) {
+            if let Some(line) = format_entry(entry, output_format, DEFAULT_FIELDS_RIB) {
                 writeln!(stdout, "{}", line)
                     .map_err(|e| anyhow!("Failed to write reconstructed RIB row: {}", e))?;
             }
@@ -124,10 +110,11 @@ fn run_sqlite_output(lens: &RibLens<'_>, args: &RibArgs, no_update: bool) -> Res
 
     remove_existing_file(output_path)?;
 
-    let sqlite_store = RibSqliteStore::new(path_to_str(output_path)?, true)?;
+    let mut sqlite_store = RibSqliteStore::new(path_to_str(output_path)?, true)?;
     let summary = lens.reconstruct_snapshots(args, no_update, |rib_ts, state_store| {
-        state_store.visit_entries(|entry| sqlite_store.insert_entry(rib_ts, &entry))
+        sqlite_store.insert_snapshot(rib_ts, state_store)
     })?;
+    sqlite_store.finalize_indexes()?;
 
     eprintln!(
         "wrote {} reconstructed RIB snapshot(s) to {}",
@@ -135,6 +122,96 @@ fn run_sqlite_output(lens: &RibLens<'_>, args: &RibArgs, no_update: bool) -> Res
         output_path.display()
     );
     Ok(())
+}
+
+fn format_entries_table(entries: &[StoredRibEntry], fields: &[&str]) -> String {
+    let mut builder = Builder::default();
+    builder.push_record(fields.iter().copied());
+
+    for entry in entries {
+        let row = fields
+            .iter()
+            .map(|field| entry_field_value(entry, field))
+            .collect::<Vec<_>>();
+        builder.push_record(row);
+    }
+
+    let mut table = builder.build();
+    table.with(Style::rounded());
+    table.to_string()
+}
+
+fn format_entry(
+    entry: &StoredRibEntry,
+    output_format: OutputFormat,
+    fields: &[&str],
+) -> Option<String> {
+    match output_format {
+        OutputFormat::Json | OutputFormat::JsonLine => {
+            Some(serde_json::to_string(&build_json_object(entry, fields)).unwrap_or_default())
+        }
+        OutputFormat::JsonPretty => Some(
+            serde_json::to_string_pretty(&build_json_object(entry, fields)).unwrap_or_default(),
+        ),
+        OutputFormat::Psv => Some(
+            fields
+                .iter()
+                .map(|field| entry_field_value(entry, field))
+                .collect::<Vec<_>>()
+                .join("|"),
+        ),
+        OutputFormat::Table => None,
+        OutputFormat::Markdown => Some(format!(
+            "| {} |",
+            fields
+                .iter()
+                .map(|field| entry_field_value(entry, field))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        )),
+    }
+}
+
+fn build_json_object(entry: &StoredRibEntry, fields: &[&str]) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+
+    for field in fields {
+        let value = match *field {
+            "collector" => json!(entry.collector),
+            "timestamp" => json!(entry.timestamp),
+            "peer_ip" => json!(entry.peer_ip.to_string()),
+            "peer_asn" => json!(entry.peer_asn),
+            "prefix" => json!(entry.prefix),
+            "as_path" => entry
+                .as_path
+                .as_ref()
+                .map_or(serde_json::Value::Null, |value| json!(value)),
+            "origin_asns" => entry
+                .origin_asns
+                .as_ref()
+                .map_or(serde_json::Value::Null, |values| {
+                    json!(values.iter().map(u32::to_string).collect::<Vec<_>>())
+                }),
+            _ => serde_json::Value::Null,
+        };
+
+        obj.insert((*field).to_string(), value);
+    }
+
+    serde_json::Value::Object(obj)
+}
+
+fn entry_field_value(entry: &StoredRibEntry, field: &str) -> String {
+    match field {
+        "collector" => entry.collector.clone(),
+        "timestamp" => TimestampFormat::Unix.format_timestamp(entry.timestamp),
+        "peer_ip" => entry.peer_ip.to_string(),
+        "peer_asn" => entry.peer_asn.to_string(),
+        "prefix" => entry.prefix.clone(),
+        "as_path" => entry.as_path.clone().unwrap_or_default(),
+        "origin_asns" => entry.origin_asns_string().unwrap_or_default(),
+        _ => String::new(),
+    }
 }
 
 fn remove_existing_file(path: &Path) -> Result<()> {

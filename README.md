@@ -740,6 +740,8 @@ Options:
 Behavior:
 
 - A single timestamp operand writes to stdout by default.
+- Stdout output is the reconstructed final route set, not an MRT/table-dump export.
+- Stdout follows the normal streaming formatter, so the default is `psv` unless `--format` or `--json` is provided.
 - Repeated timestamp operands require `--sqlite-path` and are written to one merged SQLite file keyed by `rib_ts`.
 - Providing `--sqlite-path` writes the reconstructed results to that SQLite file instead of stdout.
 - If any selected collector has no RIB at or before a requested `rib_ts`, the command aborts instead of producing a partial result.

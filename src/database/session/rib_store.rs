@@ -1,65 +1,18 @@
-//! Session-based SQLite stores for reconstructed RIB snapshots.
-//!
-//! These stores are separate from `MsgStore` because RIB reconstruction needs:
-//! - route-identity keys with `path_id`
-//! - exact `BgpElem` round-tripping for reconstructed RIB state
-//! - merged SQLite output keyed by `rib_ts`
+//! Working-state storage and SQLite export for reconstructed RIB snapshots.
+
+use std::collections::HashMap;
+use std::net::IpAddr;
 
 use anyhow::{anyhow, Result};
 use bgpkit_parser::BgpElem;
-use rusqlite::{params, OptionalExtension};
-use serde_json::Value;
-use tempfile::{NamedTempFile, TempPath};
+use rusqlite::params;
 
 use crate::database::core::DatabaseConn;
-
-fn opt_to_sql_i64(v: Option<u32>) -> i64 {
-    v.map(i64::from).unwrap_or(-1)
-}
-
-fn sql_i64_to_opt(v: i64) -> Option<u32> {
-    if v < 0 {
-        None
-    } else {
-        u32::try_from(v).ok()
-    }
-}
-
-fn elem_as_path(elem: &BgpElem) -> Option<String> {
-    elem.as_path.as_ref().map(|path| path.to_string())
-}
-
-fn elem_origin_asns(elem: &BgpElem) -> Option<String> {
-    elem.origin_asns.as_ref().map(|asns| {
-        asns.iter()
-            .map(|asn| asn.to_string())
-            .collect::<Vec<_>>()
-            .join(" ")
-    })
-}
-
-fn elem_next_hop(elem: &BgpElem) -> Option<String> {
-    elem.next_hop.as_ref().map(|hop| hop.to_string())
-}
-
-fn elem_communities(elem: &BgpElem) -> Option<String> {
-    elem.communities.as_ref().map(|communities| {
-        communities
-            .iter()
-            .map(|community| community.to_string())
-            .collect::<Vec<_>>()
-            .join(" ")
-    })
-}
-
-fn elem_origin(elem: &BgpElem) -> Option<String> {
-    elem.origin.as_ref().map(|origin| origin.to_string())
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RibRouteKey {
     pub collector: String,
-    pub peer_ip: String,
+    pub peer_ip: IpAddr,
     pub peer_asn: u32,
     pub prefix: String,
     pub path_id: Option<u32>,
@@ -69,10 +22,20 @@ impl RibRouteKey {
     pub fn from_elem(collector: &str, elem: &BgpElem) -> Self {
         Self {
             collector: collector.to_string(),
-            peer_ip: elem.peer_ip.to_string(),
+            peer_ip: elem.peer_ip,
             peer_asn: elem.peer_asn.to_u32(),
             prefix: elem.prefix.prefix.to_string(),
             path_id: elem.prefix.path_id,
+        }
+    }
+
+    pub fn from_entry(entry: &StoredRibEntry) -> Self {
+        Self {
+            collector: entry.collector.clone(),
+            peer_ip: entry.peer_ip,
+            peer_asn: entry.peer_asn,
+            prefix: entry.prefix.clone(),
+            path_id: entry.path_id,
         }
     }
 }
@@ -80,254 +43,109 @@ impl RibRouteKey {
 #[derive(Debug, Clone)]
 pub struct StoredRibEntry {
     pub collector: String,
-    pub elem: BgpElem,
+    pub timestamp: f64,
+    pub peer_ip: IpAddr,
+    pub peer_asn: u32,
+    pub prefix: String,
+    pub path_id: Option<u32>,
+    pub as_path: Option<String>,
+    pub origin_asns: Option<Vec<u32>>,
 }
 
 impl StoredRibEntry {
-    pub fn new(collector: impl Into<String>, elem: BgpElem) -> Self {
+    pub fn from_elem(collector: &str, elem: BgpElem) -> Self {
         Self {
-            collector: collector.into(),
-            elem,
+            collector: collector.to_string(),
+            timestamp: elem.timestamp,
+            peer_ip: elem.peer_ip,
+            peer_asn: elem.peer_asn.to_u32(),
+            prefix: elem.prefix.prefix.to_string(),
+            path_id: elem.prefix.path_id,
+            as_path: elem.as_path.map(|path| path.to_string()),
+            origin_asns: elem
+                .origin_asns
+                .map(|asns| asns.into_iter().map(|asn| asn.to_u32()).collect::<Vec<_>>()),
         }
     }
 
     pub fn route_key(&self) -> RibRouteKey {
-        RibRouteKey::from_elem(&self.collector, &self.elem)
+        RibRouteKey::from_entry(self)
     }
 
-    fn elem_json(&self) -> Result<String> {
-        serde_json::to_string(&self.elem)
-            .map_err(|e| anyhow!("Failed to serialize BgpElem for SQLite storage: {}", e))
-    }
-
-    fn from_row(row: &rusqlite::Row<'_>) -> Result<Self> {
-        let collector: String = row
-            .get("collector")
-            .map_err(|e| anyhow!("Failed to read collector column: {}", e))?;
-        let elem_json: String = row
-            .get("elem_json")
-            .map_err(|e| anyhow!("Failed to read elem_json column: {}", e))?;
-        let elem = serde_json::from_str::<BgpElem>(&elem_json)
-            .map_err(|e| anyhow!("Failed to deserialize stored BgpElem JSON: {}", e))?;
-        Ok(Self { collector, elem })
+    pub fn origin_asns_string(&self) -> Option<String> {
+        self.origin_asns.as_ref().map(|asns| {
+            asns.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
     }
 }
 
 pub struct RibStateStore {
-    db: DatabaseConn,
-    _temp_path: Option<TempPath>,
+    entries: HashMap<RibRouteKey, StoredRibEntry>,
 }
 
 impl RibStateStore {
-    pub fn new(db_path: Option<&str>, reset: bool) -> Result<Self> {
-        let db = DatabaseConn::open(db_path)?;
-        let store = Self {
-            db,
-            _temp_path: None,
-        };
-        store.initialize(reset)?;
-        Ok(store)
-    }
-
     pub fn new_temp() -> Result<Self> {
-        let file = NamedTempFile::new().map_err(|e| {
-            anyhow!(
-                "Failed to create temporary SQLite path for rib state: {}",
-                e
-            )
-        })?;
-        let temp_path = file.into_temp_path();
-        let db = DatabaseConn::open_path(
-            temp_path
-                .to_str()
-                .ok_or_else(|| anyhow!("Temporary rib state path contains invalid UTF-8"))?,
-        )?;
-        let store = Self {
-            db,
-            _temp_path: Some(temp_path),
-        };
-        store.initialize(true)?;
-        Ok(store)
-    }
-
-    fn initialize(&self, reset: bool) -> Result<()> {
-        if reset {
-            self.db
-                .conn
-                .execute("DROP TABLE IF EXISTS rib_state", [])
-                .map_err(|e| anyhow!("Failed to drop rib_state table: {}", e))?;
-        }
-
-        self.db
-            .conn
-            .execute_batch(
-                r#"
-                CREATE TABLE IF NOT EXISTS rib_state (
-                    collector TEXT NOT NULL,
-                    peer_ip TEXT NOT NULL,
-                    peer_asn INTEGER NOT NULL,
-                    prefix TEXT NOT NULL,
-                    path_id INTEGER NOT NULL,
-                    timestamp REAL NOT NULL,
-                    as_path TEXT,
-                    origin_asns TEXT,
-                    origin TEXT,
-                    next_hop TEXT,
-                    local_pref INTEGER,
-                    med INTEGER,
-                    communities TEXT,
-                    atomic INTEGER NOT NULL,
-                    aggr_asn INTEGER,
-                    aggr_ip TEXT,
-                    elem_json TEXT NOT NULL,
-                    PRIMARY KEY (collector, peer_ip, peer_asn, prefix, path_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_rib_state_collector ON rib_state(collector);
-                CREATE INDEX IF NOT EXISTS idx_rib_state_peer_asn ON rib_state(peer_asn);
-                CREATE INDEX IF NOT EXISTS idx_rib_state_prefix ON rib_state(prefix);
-                "#,
-            )
-            .map_err(|e| anyhow!("Failed to initialize rib_state schema: {}", e))?;
-        Ok(())
+        Ok(Self {
+            entries: HashMap::new(),
+        })
     }
 
     pub fn count(&self) -> Result<u64> {
-        self.db.table_count("rib_state")
+        Ok(self.entries.len() as u64)
     }
 
     pub fn route_exists(&self, key: &RibRouteKey) -> Result<bool> {
-        let exists = self
-            .db
-            .conn
-            .query_row(
-                "SELECT 1 FROM rib_state WHERE collector = ?1 AND peer_ip = ?2 AND peer_asn = ?3 AND prefix = ?4 AND path_id = ?5",
-                params![
-                    key.collector,
-                    key.peer_ip,
-                    key.peer_asn,
-                    key.prefix,
-                    opt_to_sql_i64(key.path_id),
-                ],
-                |_| Ok(()),
-            )
-            .optional()
-            .map_err(|e| anyhow!("Failed to test route existence in rib_state: {}", e))?;
-        Ok(exists.is_some())
+        Ok(self.entries.contains_key(key))
     }
 
-    pub fn upsert_entry(&self, entry: &StoredRibEntry) -> Result<()> {
-        self.upsert_entries(std::slice::from_ref(entry))
+    pub fn upsert_entry(&mut self, entry: StoredRibEntry) -> Result<()> {
+        self.upsert_entries(vec![entry])
     }
 
-    pub fn upsert_entries(&self, entries: &[StoredRibEntry]) -> Result<()> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-
-        let tx = self
-            .db
-            .conn
-            .unchecked_transaction()
-            .map_err(|e| anyhow!("Failed to begin rib_state transaction: {}", e))?;
-        let mut stmt = tx
-            .prepare_cached(
-                r#"
-                INSERT OR REPLACE INTO rib_state (
-                    collector, peer_ip, peer_asn, prefix, path_id, timestamp,
-                    as_path, origin_asns, origin, next_hop, local_pref, med,
-                    communities, atomic, aggr_asn, aggr_ip, elem_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
-                "#,
-            )
-            .map_err(|e| anyhow!("Failed to prepare rib_state upsert statement: {}", e))?;
-
+    pub fn upsert_entries<I>(&mut self, entries: I) -> Result<()>
+    where
+        I: IntoIterator<Item = StoredRibEntry>,
+    {
         for entry in entries {
-            stmt.execute(params![
-                entry.collector,
-                entry.elem.peer_ip.to_string(),
-                entry.elem.peer_asn.to_u32(),
-                entry.elem.prefix.prefix.to_string(),
-                opt_to_sql_i64(entry.elem.prefix.path_id),
-                entry.elem.timestamp,
-                elem_as_path(&entry.elem),
-                elem_origin_asns(&entry.elem),
-                elem_origin(&entry.elem),
-                elem_next_hop(&entry.elem),
-                entry.elem.local_pref,
-                entry.elem.med,
-                elem_communities(&entry.elem),
-                if entry.elem.atomic { 1_i64 } else { 0_i64 },
-                entry.elem.aggr_asn.map(|asn| asn.to_u32()),
-                entry.elem.aggr_ip.as_ref().map(|ip| ip.to_string()),
-                entry.elem_json()?,
-            ])
-            .map_err(|e| anyhow!("Failed to upsert entry into rib_state: {}", e))?;
+            self.entries.insert(entry.route_key(), entry);
         }
-
-        drop(stmt);
-        tx.commit()
-            .map_err(|e| anyhow!("Failed to commit rib_state upserts: {}", e))?;
         Ok(())
     }
 
-    pub fn delete_key(&self, key: &RibRouteKey) -> Result<()> {
-        self.delete_keys(std::slice::from_ref(key))
+    pub fn delete_key(&mut self, key: &RibRouteKey) -> Result<()> {
+        self.entries.remove(key);
+        Ok(())
     }
 
-    pub fn delete_keys(&self, keys: &[RibRouteKey]) -> Result<()> {
-        if keys.is_empty() {
-            return Ok(());
-        }
-
-        let tx = self
-            .db
-            .conn
-            .unchecked_transaction()
-            .map_err(|e| anyhow!("Failed to begin rib_state delete transaction: {}", e))?;
-        let mut stmt = tx
-            .prepare_cached(
-                "DELETE FROM rib_state WHERE collector = ?1 AND peer_ip = ?2 AND peer_asn = ?3 AND prefix = ?4 AND path_id = ?5",
-            )
-            .map_err(|e| anyhow!("Failed to prepare rib_state delete statement: {}", e))?;
-
+    pub fn delete_keys<I>(&mut self, keys: I) -> Result<()>
+    where
+        I: IntoIterator<Item = RibRouteKey>,
+    {
         for key in keys {
-            stmt.execute(params![
-                key.collector,
-                key.peer_ip,
-                key.peer_asn,
-                key.prefix,
-                opt_to_sql_i64(key.path_id),
-            ])
-            .map_err(|e| anyhow!("Failed to delete entry from rib_state: {}", e))?;
+            self.entries.remove(&key);
         }
-
-        drop(stmt);
-        tx.commit()
-            .map_err(|e| anyhow!("Failed to commit rib_state deletes: {}", e))?;
         Ok(())
     }
 
     pub fn visit_entries<F>(&self, mut visitor: F) -> Result<()>
     where
-        F: FnMut(StoredRibEntry) -> Result<()>,
+        F: FnMut(&StoredRibEntry) -> Result<()>,
     {
-        let mut stmt = self
-            .db
-            .conn
-            .prepare(
-                "SELECT collector, elem_json FROM rib_state ORDER BY collector, peer_asn, peer_ip, prefix, path_id",
-            )
-            .map_err(|e| anyhow!("Failed to prepare rib_state scan statement: {}", e))?;
+        let mut entries = self.entries.values().collect::<Vec<_>>();
+        entries.sort_by(|a, b| {
+            a.collector
+                .cmp(&b.collector)
+                .then(a.peer_asn.cmp(&b.peer_asn))
+                .then(a.peer_ip.to_string().cmp(&b.peer_ip.to_string()))
+                .then(a.prefix.cmp(&b.prefix))
+                .then(a.path_id.cmp(&b.path_id))
+        });
 
-        let mut rows = stmt
-            .query([])
-            .map_err(|e| anyhow!("Failed to query rib_state rows: {}", e))?;
-
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| anyhow!("Failed to iterate rib_state rows: {}", e))?
-        {
-            visitor(StoredRibEntry::from_row(row)?)?;
+        for entry in entries {
+            visitor(entry)?;
         }
 
         Ok(())
@@ -365,76 +183,66 @@ impl RibSqliteStore {
                     peer_ip TEXT NOT NULL,
                     peer_asn INTEGER NOT NULL,
                     prefix TEXT NOT NULL,
-                    path_id INTEGER NOT NULL,
                     as_path TEXT,
-                    origin_asns TEXT,
-                    origin TEXT,
-                    next_hop TEXT,
-                    local_pref INTEGER,
-                    med INTEGER,
-                    communities TEXT,
-                    atomic INTEGER NOT NULL,
-                    aggr_asn INTEGER,
-                    aggr_ip TEXT
+                    origin_asns TEXT
                 );
-                CREATE INDEX IF NOT EXISTS idx_rib_output_rib_ts ON elems(rib_ts);
-                CREATE INDEX IF NOT EXISTS idx_rib_output_rib_ts_prefix ON elems(rib_ts, prefix);
-                CREATE INDEX IF NOT EXISTS idx_rib_output_rib_ts_peer_asn ON elems(rib_ts, peer_asn);
-                CREATE INDEX IF NOT EXISTS idx_rib_output_rib_ts_collector ON elems(rib_ts, collector);
                 "#,
             )
             .map_err(|e| anyhow!("Failed to initialize rib output SQLite schema: {}", e))?;
         Ok(())
     }
 
-    pub fn insert_entry(&self, rib_ts: i64, entry: &StoredRibEntry) -> Result<()> {
-        self.db
+    pub fn insert_snapshot(&mut self, rib_ts: i64, state_store: &RibStateStore) -> Result<()> {
+        let tx = self
+            .db
             .conn
-            .execute(
+            .unchecked_transaction()
+            .map_err(|e| anyhow!("Failed to begin rib output transaction: {}", e))?;
+        let mut stmt = tx
+            .prepare_cached(
                 r#"
                 INSERT INTO elems (
-                    rib_ts, timestamp, collector, peer_ip, peer_asn, prefix, path_id,
-                    as_path, origin_asns, origin, next_hop, local_pref, med,
-                    communities, atomic, aggr_asn, aggr_ip
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                    rib_ts, timestamp, collector, peer_ip, peer_asn, prefix, as_path, origin_asns
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                 "#,
-                params![
-                    rib_ts,
-                    entry.elem.timestamp,
-                    entry.collector,
-                    entry.elem.peer_ip.to_string(),
-                    entry.elem.peer_asn.to_u32(),
-                    entry.elem.prefix.prefix.to_string(),
-                    opt_to_sql_i64(entry.elem.prefix.path_id),
-                    elem_as_path(&entry.elem),
-                    elem_origin_asns(&entry.elem),
-                    elem_origin(&entry.elem),
-                    elem_next_hop(&entry.elem),
-                    entry.elem.local_pref,
-                    entry.elem.med,
-                    elem_communities(&entry.elem),
-                    if entry.elem.atomic { 1_i64 } else { 0_i64 },
-                    entry.elem.aggr_asn.map(|asn| asn.to_u32()),
-                    entry.elem.aggr_ip.as_ref().map(|ip| ip.to_string()),
-                ],
             )
+            .map_err(|e| anyhow!("Failed to prepare rib output insert statement: {}", e))?;
+
+        state_store.visit_entries(|entry| {
+            stmt.execute(params![
+                rib_ts,
+                entry.timestamp,
+                entry.collector,
+                entry.peer_ip.to_string(),
+                entry.peer_asn,
+                entry.prefix,
+                entry.as_path,
+                entry.origin_asns_string(),
+            ])
             .map_err(|e| anyhow!("Failed to insert entry into rib output SQLite store: {}", e))?;
+            Ok(())
+        })?;
+
+        drop(stmt);
+        tx.commit()
+            .map_err(|e| anyhow!("Failed to commit rib output inserts: {}", e))?;
         Ok(())
     }
-}
 
-pub fn elem_matches_stored_json(elem_json: &str, key: &str) -> Result<Option<Value>> {
-    let value = serde_json::from_str::<Value>(elem_json)
-        .map_err(|e| anyhow!("Failed to deserialize stored elem_json value: {}", e))?;
-    Ok(value.get(key).cloned())
-}
-
-pub fn path_id_for_key(path_id: Option<u32>) -> i64 {
-    opt_to_sql_i64(path_id)
-}
-
-pub fn path_id_from_key(path_id: i64) -> Option<u32> {
-    sql_i64_to_opt(path_id)
+    pub fn finalize_indexes(&self) -> Result<()> {
+        self.db
+            .conn
+            .execute_batch(
+                r#"
+                CREATE INDEX IF NOT EXISTS idx_rib_output_rib_ts ON elems(rib_ts);
+                CREATE INDEX IF NOT EXISTS idx_rib_output_rib_ts_prefix ON elems(rib_ts, prefix);
+                CREATE INDEX IF NOT EXISTS idx_rib_output_rib_ts_peer_asn ON elems(rib_ts, peer_asn);
+                CREATE INDEX IF NOT EXISTS idx_rib_output_rib_ts_collector ON elems(rib_ts, collector);
+                "#,
+            )
+            .map_err(|e| anyhow!("Failed to create rib output SQLite indexes: {}", e))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -470,36 +278,20 @@ mod tests {
 
     #[test]
     fn test_rib_state_store_round_trip() -> Result<()> {
-        let store = RibStateStore::new_temp()?;
-        let entry = StoredRibEntry::new("rrc00", test_elem()?);
-        store.upsert_entry(&entry)?;
+        let mut store = RibStateStore::new_temp()?;
+        let entry = StoredRibEntry::from_elem("rrc00", test_elem()?);
+        store.upsert_entry(entry.clone())?;
         assert!(store.route_exists(&entry.route_key())?);
 
         let mut visited = Vec::new();
         store.visit_entries(|entry| {
-            visited.push(entry);
+            visited.push(entry.clone());
             Ok(())
         })?;
 
         assert_eq!(visited.len(), 1);
         assert_eq!(visited[0].collector, "rrc00");
-        assert_eq!(visited[0].elem.prefix.path_id, Some(7));
-        Ok(())
-    }
-
-    #[test]
-    fn test_path_id_helpers() {
-        assert_eq!(path_id_for_key(None), -1);
-        assert_eq!(path_id_from_key(-1), None);
-        assert_eq!(path_id_from_key(42), Some(42));
-    }
-
-    #[test]
-    fn test_elem_json_access() -> Result<()> {
-        let elem = test_elem()?;
-        let entry = StoredRibEntry::new("rrc00", elem);
-        let origin_asns = elem_matches_stored_json(&entry.elem_json()?, "origin_asns")?;
-        assert!(origin_asns.is_some());
+        assert_eq!(visited[0].path_id, Some(7));
         Ok(())
     }
 }

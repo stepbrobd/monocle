@@ -15,7 +15,11 @@ All notable changes to this project will be documented in this file.
 
 ### Code Improvements
 
-* Added session-backed SQLite stores for reconstructed RIB working state and merged SQLite export
+* Added a session-backed SQLite store for merged reconstructed RIB export
+* Updated `monocle rib` reconstruction to keep the working RIB state in memory
+  * Removes SQLite lookups and writes from the replay hot path
+  * Keeps `path_id` only for internal route identity during add-path reconstruction
+  * Narrows reconstructed RIB entries and SQLite export rows to collector, timestamp, peer_ip, peer_asn, prefix, as_path, and origin_asns
 
 ## v1.2.0 - 2026-02-28
 

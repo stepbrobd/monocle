@@ -146,62 +146,6 @@ impl RibArgs {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RibRow {
-    pub rib_ts: i64,
-    pub timestamp: f64,
-    pub collector: String,
-    pub peer_ip: String,
-    pub peer_asn: u32,
-    pub prefix: String,
-    pub path_id: Option<u32>,
-    pub as_path: Option<String>,
-    pub origin_asns: Option<String>,
-    pub origin: Option<String>,
-    pub next_hop: Option<String>,
-    pub local_pref: Option<u32>,
-    pub med: Option<u32>,
-    pub communities: Option<String>,
-    pub atomic: bool,
-    pub aggr_asn: Option<u32>,
-    pub aggr_ip: Option<String>,
-}
-
-impl RibRow {
-    pub fn from_entry(rib_ts: i64, entry: &StoredRibEntry) -> Self {
-        Self {
-            rib_ts,
-            timestamp: entry.elem.timestamp,
-            collector: entry.collector.clone(),
-            peer_ip: entry.elem.peer_ip.to_string(),
-            peer_asn: entry.elem.peer_asn.to_u32(),
-            prefix: entry.elem.prefix.prefix.to_string(),
-            path_id: entry.elem.prefix.path_id,
-            as_path: entry.elem.as_path.as_ref().map(|path| path.to_string()),
-            origin_asns: entry.elem.origin_asns.as_ref().map(|asns| {
-                asns.iter()
-                    .map(|asn| asn.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            }),
-            origin: entry.elem.origin.as_ref().map(|origin| origin.to_string()),
-            next_hop: entry.elem.next_hop.as_ref().map(|hop| hop.to_string()),
-            local_pref: entry.elem.local_pref,
-            med: entry.elem.med,
-            communities: entry.elem.communities.as_ref().map(|communities| {
-                communities
-                    .iter()
-                    .map(|community| community.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            }),
-            atomic: entry.elem.atomic,
-            aggr_asn: entry.elem.aggr_asn.map(|asn| asn.to_u32()),
-            aggr_ip: entry.elem.aggr_ip.as_ref().map(|ip| ip.to_string()),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct RibRunSummary {
     pub rib_ts: Vec<i64>,
@@ -261,7 +205,7 @@ impl<'a> RibLens<'a> {
         };
 
         for group in &groups {
-            let state_store = RibStateStore::new_temp()?;
+            let mut state_store = RibStateStore::new_temp()?;
             let safe_base_filters = self.safe_parse_filters(
                 args,
                 group.rib_item.ts_start.and_utc().timestamp(),
@@ -269,7 +213,7 @@ impl<'a> RibLens<'a> {
             );
 
             self.load_base_rib(
-                &state_store,
+                &mut state_store,
                 &group.collector,
                 &group.rib_item,
                 &safe_base_filters,
@@ -280,7 +224,7 @@ impl<'a> RibLens<'a> {
             )?;
 
             self.replay_updates(
-                &state_store,
+                &mut state_store,
                 group,
                 args,
                 country_asns.as_ref(),
@@ -625,7 +569,7 @@ impl<'a> RibLens<'a> {
     #[allow(clippy::too_many_arguments)]
     fn load_base_rib(
         &self,
-        state_store: &RibStateStore,
+        state_store: &mut RibStateStore,
         collector: &str,
         rib_item: &BrokerItem,
         safe_filters: &ParseFilters,
@@ -655,18 +599,18 @@ impl<'a> RibLens<'a> {
                 as_path_regex,
                 full_feed_allowlist,
             ) {
-                batch.push(StoredRibEntry::new(collector.to_string(), elem));
+                batch.push(StoredRibEntry::from_elem(collector, elem));
             }
         }
 
-        state_store.upsert_entries(&batch)?;
+        state_store.upsert_entries(batch)?;
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
     fn replay_updates<F>(
         &self,
-        state_store: &RibStateStore,
+        state_store: &mut RibStateStore,
         group: &RibReplayGroup,
         args: &RibArgs,
         country_asns: Option<&HashSet<u32>>,
@@ -762,7 +706,7 @@ impl<'a> RibLens<'a> {
                 if matches {
                     pending.insert(
                         route_key,
-                        DeltaOp::Upsert(StoredRibEntry::new(collector.to_string(), elem)),
+                        DeltaOp::Upsert(StoredRibEntry::from_elem(collector, elem)),
                     );
                 } else if self.route_exists_in_state_or_delta(&route_key, state_store, pending)? {
                     pending.insert(route_key.clone(), DeltaOp::Delete(route_key));
@@ -787,7 +731,7 @@ impl<'a> RibLens<'a> {
 
     fn flush_pending(
         &self,
-        state_store: &RibStateStore,
+        state_store: &mut RibStateStore,
         pending: &mut HashMap<RibRouteKey, DeltaOp>,
     ) -> Result<()> {
         if pending.is_empty() {
@@ -805,10 +749,10 @@ impl<'a> RibLens<'a> {
         }
 
         if !upserts.is_empty() {
-            state_store.upsert_entries(&upserts)?;
+            state_store.upsert_entries(upserts)?;
         }
         if !deletes.is_empty() {
-            state_store.delete_keys(&deletes)?;
+            state_store.delete_keys(deletes)?;
         }
 
         pending.clear();
