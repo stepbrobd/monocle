@@ -80,12 +80,12 @@ impl From<&RpkiAspaEntry> for RpkiAspaTableEntry {
 /// Parse RPKIviews collector from string
 pub fn parse_rpkiviews_collector(collector: &str) -> Result<RpkiViewsCollector> {
     match collector.to_lowercase().as_str() {
-        "soborost" | "soborostnet" => Ok(RpkiViewsCollector::SoborostNet),
+        "sobornost" | "sobornostnet" => Ok(RpkiViewsCollector::SobornostNet),
         "massars" | "massarsnet" => Ok(RpkiViewsCollector::MassarsNet),
         "attn" | "attnjp" => Ok(RpkiViewsCollector::AttnJp),
         "kerfuffle" | "kerfufflenet" => Ok(RpkiViewsCollector::KerfuffleNet),
         _ => Err(anyhow!(
-            "Unknown RPKIviews collector: {}. Valid options: soborost, massars, attn, kerfuffle",
+            "Unknown RPKIviews collector: {}. Valid options: sobornost, massars, attn, kerfuffle",
             collector
         )),
     }
@@ -99,7 +99,7 @@ pub fn parse_historical_source(
     match source.to_lowercase().as_str() {
         "ripe" => Ok(HistoricalRpkiSource::Ripe),
         "rpkiviews" => {
-            let collector = collector.unwrap_or("soborost");
+            let collector = collector.unwrap_or("sobornost");
             let rpkiviews_collector = parse_rpkiviews_collector(collector)?;
             Ok(HistoricalRpkiSource::RpkiViews(rpkiviews_collector))
         }
@@ -260,8 +260,8 @@ mod tests {
     #[test]
     fn test_parse_rpkiviews_collector() {
         assert!(matches!(
-            parse_rpkiviews_collector("soborost").unwrap(),
-            RpkiViewsCollector::SoborostNet
+            parse_rpkiviews_collector("sobornost").unwrap(),
+            RpkiViewsCollector::SobornostNet
         ));
         assert!(matches!(
             parse_rpkiviews_collector("kerfuffle").unwrap(),
@@ -277,8 +277,8 @@ mod tests {
             HistoricalRpkiSource::Ripe
         ));
         assert!(matches!(
-            parse_historical_source("rpkiviews", Some("soborost")).unwrap(),
-            HistoricalRpkiSource::RpkiViews(RpkiViewsCollector::SoborostNet)
+            parse_historical_source("rpkiviews", Some("sobornost")).unwrap(),
+            HistoricalRpkiSource::RpkiViews(RpkiViewsCollector::SobornostNet)
         ));
     }
 }

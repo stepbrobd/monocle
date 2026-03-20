@@ -40,8 +40,8 @@ pub enum RpkiCommands {
         #[clap(long, default_value = "ripe")]
         source: String,
 
-        /// RPKIviews collector: soborost, massars, attn, kerfuffle (default: soborost)
-        #[clap(long, default_value = "soborost")]
+        /// RPKIviews collector: sobornost, massars, attn, kerfuffle (default: sobornost)
+        #[clap(long, default_value = "sobornost")]
         collector: String,
 
         /// Force refresh the RPKI cache (only applies to current data)
@@ -67,8 +67,8 @@ pub enum RpkiCommands {
         #[clap(long, default_value = "ripe")]
         source: String,
 
-        /// RPKIviews collector: soborost, massars, attn, kerfuffle (default: soborost)
-        #[clap(long, default_value = "soborost")]
+        /// RPKIviews collector: sobornost, massars, attn, kerfuffle (default: sobornost)
+        #[clap(long, default_value = "sobornost")]
         collector: String,
 
         /// Force refresh the RPKI cache (only applies to current data)
@@ -425,7 +425,7 @@ fn parse_data_source(source: &str) -> RpkiDataSource {
 
 fn parse_collector(collector: &str) -> Option<RpkiViewsCollectorOption> {
     match collector.to_lowercase().as_str() {
-        "soborost" => Some(RpkiViewsCollectorOption::Soborost),
+        "sobornost" => Some(RpkiViewsCollectorOption::Sobornost),
         "massars" => Some(RpkiViewsCollectorOption::Massars),
         "attn" => Some(RpkiViewsCollectorOption::Attn),
         "kerfuffle" => Some(RpkiViewsCollectorOption::Kerfuffle),

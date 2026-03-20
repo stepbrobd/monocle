@@ -1243,7 +1243,7 @@ Options:
       --date <DATE>            Load historical data for this date (YYYY-MM-DD)
       --debug                  Print debug information
       --source <SOURCE>        Historical data source: ripe, rpkiviews (default: ripe) [default: ripe]
-      --collector <COLLECTOR>  RPKIviews collector: soborost, massars, attn, kerfuffle (default: soborost) [default: soborost]
+      --collector <COLLECTOR>  RPKIviews collector: sobornost, massars, attn, kerfuffle (default: sobornost) [default: sobornost]
       --format <FORMAT>        Output format: table, markdown, json, json-pretty, json-line, psv (default varies by command)
       --json                   Output as JSON objects (shortcut for --format json-pretty)
   -r, --refresh                Force refresh the RPKI cache (only applies to current data)
@@ -1295,7 +1295,7 @@ Options:
       --format <FORMAT>        Output format: table, markdown, json, json-pretty, json-line, psv (default varies by command)
       --json                   Output as JSON objects (shortcut for --format json-pretty)
       --source <SOURCE>        Historical data source: ripe, rpkiviews (default: ripe) [default: ripe]
-      --collector <COLLECTOR>  RPKIviews collector: soborost, massars, attn, kerfuffle (default: soborost) [default: soborost]
+      --collector <COLLECTOR>  RPKIviews collector: sobornost, massars, attn, kerfuffle (default: sobornost) [default: sobornost]
       --no-update              Disable automatic database updates (use existing cached data only)
   -r, --refresh                Force refresh the RPKI cache (only applies to current data)
   -h, --help                   Print help
