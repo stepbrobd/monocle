@@ -60,9 +60,9 @@ pub enum RpkiDataSource {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum RpkiViewsCollectorOption {
-    /// SoborostNet collector (default)
+    /// SobornostNet collector (default)
     #[default]
-    Soborost,
+    Sobornost,
     /// MassarsNet collector
     Massars,
     /// AttnJp collector
@@ -814,7 +814,7 @@ impl<'a> RpkiLens<'a> {
         };
 
         let collector_str = collector.map(|c| match c {
-            RpkiViewsCollectorOption::Soborost => "soborost",
+            RpkiViewsCollectorOption::Sobornost => "sobornost",
             RpkiViewsCollectorOption::Massars => "massars",
             RpkiViewsCollectorOption::Attn => "attn",
             RpkiViewsCollectorOption::Kerfuffle => "kerfuffle",
