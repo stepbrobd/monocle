@@ -122,6 +122,8 @@ pub fn load_historical_rpki(date: NaiveDate, source: HistoricalRpkiSource) -> Re
             .map_err(|e| anyhow!("Failed to load RIPE historical RPKI data: {}", e)),
         HistoricalRpkiSource::RpkiViews(collector) => RpkiTrie::from_rpkiviews(collector, date)
             .map_err(|e| anyhow!("Failed to load RPKIviews RPKI data: {}", e)),
+        HistoricalRpkiSource::RpkiSpools(collector) => RpkiTrie::from_rpkispools(collector, date)
+            .map_err(|e| anyhow!("Failed to load RPKISpools RPKI data: {}", e)),
     }
 }
 
