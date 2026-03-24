@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased changes
 
+### Breaking Changes
+
+* Changed `monocle rib --sqlite-path` output schema from single `elems` table to two tables:
+  * `ribs` table: stores final reconstructed RIB states at each target timestamp
+  * `updates` table: stores filtered BGP updates used to build 2nd and later RIB snapshots
+  * Updates table is only populated for RIBs after the first/base RIB
+
 ### New Features
 
 * Added `monocle rib` for reconstructing RIB state at arbitrary timestamps
@@ -13,8 +20,16 @@ All notable changes to this project will be documented in this file.
   * Aborts when no RIB exists at or before a requested `rib_ts` for a selected collector
   * Supports `--country`, `--origin-asn`, `--prefix`, `--as-path`, `--peer-asn`, `--collector`, `--project`, and `--full-feed-only`
 
+### Performance Improvements
+
+* Reduced string allocations in RIB reconstruction by using `Arc<str>` for collector and prefix fields
+* Removed unnecessary per-snapshot sorting that was `O(n log n)` on all entries
+* Reduced updates query window from +2 hours lookahead to exact target timestamp
+  * Results in 33% fewer update files downloaded for typical requests
+
 ### Code Improvements
 
+* Added `StoredRibUpdate` struct to track filtered BGP updates during reconstruction
 * Added a session-backed SQLite store for merged reconstructed RIB export
 * Updated `monocle rib` reconstruction to keep the working RIB state in memory
   * Removes SQLite lookups and writes from the replay hot path

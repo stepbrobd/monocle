@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use bgpkit_broker::{BgpkitBroker, BrokerItem};
@@ -17,7 +18,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::config::MonocleConfig;
-use crate::database::{MonocleDatabase, RibRouteKey, RibStateStore, StoredRibEntry};
+use crate::database::{
+    MonocleDatabase, RibRouteKey, RibStateStore, StoredRibEntry, StoredRibUpdate,
+};
 use crate::lens::country::CountryLens;
 use crate::lens::parse::ParseFilters;
 use crate::lens::time::TimeLens;
@@ -28,7 +31,6 @@ use clap::Args;
 const FULL_FEED_V4_THRESHOLD: u32 = 800_000;
 const FULL_FEED_V6_THRESHOLD: u32 = 100_000;
 const RIB_LOOKBACK_HOURS: i64 = 24 * 30;
-const UPDATES_LOOKAHEAD_HOURS: i64 = 2;
 
 type FullFeedAllowlists = HashMap<String, HashSet<(String, u32)>>;
 
@@ -183,6 +185,13 @@ impl<'a> RibLens<'a> {
         Self { db, config }
     }
 
+    /// Reconstruct RIB snapshots at specified timestamps.
+    ///
+    /// The `snapshot_visitor` callback is invoked for each snapshot with:
+    /// - `i64`: The target RIB timestamp
+    /// - `&RibStateStore`: The final reconstructed RIB state
+    /// - `&[StoredRibUpdate]`: Filtered updates that contributed to this snapshot
+    ///   (empty for the first/base RIB, populated for subsequent RIBs)
     pub fn reconstruct_snapshots<F>(
         &self,
         args: &RibArgs,
@@ -190,7 +199,7 @@ impl<'a> RibLens<'a> {
         mut snapshot_visitor: F,
     ) -> Result<RibRunSummary>
     where
-        F: FnMut(i64, &RibStateStore) -> Result<()>,
+        F: FnMut(i64, &RibStateStore, &[StoredRibUpdate]) -> Result<()>,
     {
         let normalized_ts = args.validate()?;
         let country_asns = self.resolve_country_asns(args.filters.country.as_deref(), no_update)?;
@@ -223,16 +232,44 @@ impl<'a> RibLens<'a> {
                 allowlists.get(group.collector.as_str()),
             )?;
 
-            self.replay_updates(
-                &mut state_store,
-                group,
-                args,
-                country_asns.as_ref(),
-                origin_filter.as_ref(),
-                as_path_regex.as_ref(),
-                allowlists.get(group.collector.as_str()),
-                &mut snapshot_visitor,
-            )?;
+            // If the first target timestamp equals the RIB time, emit it immediately
+            // with empty updates (it's the base RIB, not built from updates)
+            let rib_ts = group.rib_item.ts_start.and_utc().timestamp();
+            if group
+                .rib_ts
+                .first()
+                .map(|&ts| ts == rib_ts)
+                .unwrap_or(false)
+            {
+                snapshot_visitor(group.rib_ts[0], &state_store, &[])?;
+                // Create a new group with remaining timestamps for replay
+                let remaining_ts: Vec<i64> = group.rib_ts.iter().skip(1).copied().collect();
+                if !remaining_ts.is_empty() {
+                    let mut new_group = group.clone();
+                    new_group.rib_ts = remaining_ts;
+                    self.replay_updates(
+                        &mut state_store,
+                        &new_group,
+                        args,
+                        country_asns.as_ref(),
+                        origin_filter.as_ref(),
+                        as_path_regex.as_ref(),
+                        allowlists.get(group.collector.as_str()),
+                        &mut snapshot_visitor,
+                    )?;
+                }
+            } else {
+                self.replay_updates(
+                    &mut state_store,
+                    group,
+                    args,
+                    country_asns.as_ref(),
+                    origin_filter.as_ref(),
+                    as_path_regex.as_ref(),
+                    allowlists.get(group.collector.as_str()),
+                    &mut snapshot_visitor,
+                )?;
+            }
         }
 
         let collector_count = groups
@@ -502,14 +539,13 @@ impl<'a> RibLens<'a> {
         group_max_ts: i64,
     ) -> Result<Vec<BrokerItem>> {
         let rib_ts = rib_item.ts_start.and_utc().timestamp();
-        let query_end = group_max_ts + Duration::hours(UPDATES_LOOKAHEAD_HOURS).num_seconds();
 
         let mut broker = self
             .base_broker(args)
             .collector_id(collector)
             .data_type("updates")
             .ts_start(Self::timestamp_to_broker_string(rib_ts)?)
-            .ts_end(Self::timestamp_to_broker_string(query_end)?);
+            .ts_end(Self::timestamp_to_broker_string(group_max_ts)?);
 
         if let Some(project) = &args.filters.project {
             broker = broker.project(project);
@@ -523,10 +559,11 @@ impl<'a> RibLens<'a> {
             )
         })?;
 
+        // Only keep update files that contain data up to and including the target timestamp.
+        // An update file with ts_end <= group_max_ts has all elements with timestamp <= group_max_ts.
         updates.retain(|item| {
-            let item_start = item.ts_start.and_utc().timestamp();
             let item_end = item.ts_end.and_utc().timestamp();
-            item_start <= group_max_ts && item_end > rib_ts
+            item_end > rib_ts && item_end <= group_max_ts
         });
         updates.sort_by_key(|item| item.ts_start);
         Ok(updates)
@@ -586,6 +623,7 @@ impl<'a> RibLens<'a> {
             )
         })?;
 
+        let collector_arc = Arc::from(collector);
         let mut batch = Vec::new();
         for elem in parser {
             if elem.elem_type != ElemType::ANNOUNCE {
@@ -599,7 +637,7 @@ impl<'a> RibLens<'a> {
                 as_path_regex,
                 full_feed_allowlist,
             ) {
-                batch.push(StoredRibEntry::from_elem(collector, elem));
+                batch.push(StoredRibEntry::from_elem(Arc::clone(&collector_arc), elem));
             }
         }
 
@@ -620,10 +658,15 @@ impl<'a> RibLens<'a> {
         snapshot_visitor: &mut F,
     ) -> Result<()>
     where
-        F: FnMut(i64, &RibStateStore) -> Result<()>,
+        F: FnMut(i64, &RibStateStore, &[StoredRibUpdate]) -> Result<()>,
     {
         let mut pending = HashMap::<RibRouteKey, DeltaOp>::new();
         let mut next_snapshot_index = 0usize;
+        let collector_arc = Arc::from(group.collector.as_str());
+
+        // Track filtered updates for the current snapshot interval
+        // These are updates that matched filters and affected the RIB state
+        let mut filtered_updates: Vec<StoredRibUpdate> = Vec::new();
 
         for update in &group.updates {
             let safe_filters = self.safe_parse_filters(
@@ -647,56 +690,90 @@ impl<'a> RibLens<'a> {
                     && elem.timestamp > group.rib_ts[next_snapshot_index] as f64
                 {
                     self.flush_pending(state_store, &mut pending)?;
-                    snapshot_visitor(group.rib_ts[next_snapshot_index], state_store)?;
+                    // For the first RIB (index 0), pass empty updates
+                    // For subsequent RIBs, pass the collected filtered updates
+                    snapshot_visitor(
+                        group.rib_ts[next_snapshot_index],
+                        state_store,
+                        &filtered_updates,
+                    )?;
+                    // Clear updates after emitting snapshot (they belong to this snapshot)
+                    filtered_updates.clear();
                     next_snapshot_index += 1;
                 }
 
-                self.apply_update_to_delta(
+                // Apply update and track if it was filtered/matched
+                let was_applied = self.apply_update_to_delta(
                     &mut pending,
                     state_store,
-                    &group.collector,
-                    elem,
+                    Arc::clone(&collector_arc),
+                    &elem,
                     country_asns,
                     origin_filter,
                     as_path_regex,
                     full_feed_allowlist,
                 )?;
+
+                // If the update was applied (matched filters), track it for the updates table
+                if was_applied {
+                    let elem_type = elem.elem_type;
+                    let update_record = StoredRibUpdate::from_elem(
+                        group.rib_ts[next_snapshot_index.min(group.rib_ts.len() - 1)],
+                        Arc::clone(&collector_arc),
+                        elem,
+                        elem_type,
+                    );
+                    filtered_updates.push(update_record);
+                }
             }
         }
 
         while next_snapshot_index < group.rib_ts.len() {
             self.flush_pending(state_store, &mut pending)?;
-            snapshot_visitor(group.rib_ts[next_snapshot_index], state_store)?;
+            snapshot_visitor(
+                group.rib_ts[next_snapshot_index],
+                state_store,
+                &filtered_updates,
+            )?;
+            filtered_updates.clear();
             next_snapshot_index += 1;
         }
 
         Ok(())
     }
 
+    /// Apply an update to the pending delta and return whether it matched filters.
+    ///
+    /// Returns `true` if the update matched filters and was recorded in the delta,
+    /// `false` if it was filtered out (doesn't mean it won't affect state - withdraws
+    /// always check for existing routes).
     #[allow(clippy::too_many_arguments)]
     fn apply_update_to_delta(
         &self,
         pending: &mut HashMap<RibRouteKey, DeltaOp>,
         state_store: &RibStateStore,
-        collector: &str,
-        elem: BgpElem,
+        collector: Arc<str>,
+        elem: &BgpElem,
         country_asns: Option<&HashSet<u32>>,
         origin_filter: Option<&OriginFilter>,
         as_path_regex: Option<&Regex>,
         full_feed_allowlist: Option<&HashSet<(String, u32)>>,
-    ) -> Result<()> {
-        let route_key = RibRouteKey::from_elem(collector, &elem);
+    ) -> Result<bool> {
+        let route_key = RibRouteKey::from_elem(Arc::clone(&collector), elem);
 
         match elem.elem_type {
             ElemType::WITHDRAW => {
                 if self.route_exists_in_state_or_delta(&route_key, state_store, pending)? {
                     pending.insert(route_key.clone(), DeltaOp::Delete(route_key));
+                    Ok(true)
+                } else {
+                    Ok(false)
                 }
             }
             ElemType::ANNOUNCE => {
                 let matches = self.announce_matches(
-                    collector,
-                    &elem,
+                    &collector,
+                    elem,
                     country_asns,
                     origin_filter,
                     as_path_regex,
@@ -706,15 +783,17 @@ impl<'a> RibLens<'a> {
                 if matches {
                     pending.insert(
                         route_key,
-                        DeltaOp::Upsert(StoredRibEntry::from_elem(collector, elem)),
+                        DeltaOp::Upsert(StoredRibEntry::from_elem(collector, elem.clone())),
                     );
+                    Ok(true)
                 } else if self.route_exists_in_state_or_delta(&route_key, state_store, pending)? {
                     pending.insert(route_key.clone(), DeltaOp::Delete(route_key));
+                    Ok(true)
+                } else {
+                    Ok(false)
                 }
             }
         }
-
-        Ok(())
     }
 
     fn route_exists_in_state_or_delta(

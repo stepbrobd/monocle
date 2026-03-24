@@ -61,12 +61,16 @@ fn run_stdout(
 
     if output_format == OutputFormat::Table {
         let mut entries = Vec::<StoredRibEntry>::new();
-        lens.reconstruct_snapshots(args, no_update, |_rib_ts, state_store| {
-            state_store.visit_entries(|entry| {
-                entries.push(entry.clone());
-                Ok(())
-            })
-        })?;
+        lens.reconstruct_snapshots(
+            args,
+            no_update,
+            |_rib_ts, state_store, _filtered_updates| {
+                state_store.visit_entries(|entry| {
+                    entries.push(entry.clone());
+                    Ok(())
+                })
+            },
+        )?;
 
         if !entries.is_empty() {
             writeln!(
@@ -80,23 +84,27 @@ fn run_stdout(
     }
 
     let mut header_written = false;
-    lens.reconstruct_snapshots(args, no_update, |_rib_ts, state_store| {
-        if !header_written {
-            if let Some(header) = get_header(output_format, DEFAULT_FIELDS_RIB) {
-                writeln!(stdout, "{}", header)
-                    .map_err(|e| anyhow!("Failed to write output header: {}", e))?;
+    lens.reconstruct_snapshots(
+        args,
+        no_update,
+        |_rib_ts, state_store, _filtered_updates| {
+            if !header_written {
+                if let Some(header) = get_header(output_format, DEFAULT_FIELDS_RIB) {
+                    writeln!(stdout, "{}", header)
+                        .map_err(|e| anyhow!("Failed to write output header: {}", e))?;
+                }
+                header_written = true;
             }
-            header_written = true;
-        }
 
-        state_store.visit_entries(|entry| {
-            if let Some(line) = format_entry(entry, output_format, DEFAULT_FIELDS_RIB) {
-                writeln!(stdout, "{}", line)
-                    .map_err(|e| anyhow!("Failed to write reconstructed RIB row: {}", e))?;
-            }
-            Ok(())
-        })
-    })?;
+            state_store.visit_entries(|entry| {
+                if let Some(line) = format_entry(entry, output_format, DEFAULT_FIELDS_RIB) {
+                    writeln!(stdout, "{}", line)
+                        .map_err(|e| anyhow!("Failed to write reconstructed RIB row: {}", e))?;
+                }
+                Ok(())
+            })
+        },
+    )?;
 
     Ok(())
 }
@@ -111,9 +119,10 @@ fn run_sqlite_output(lens: &RibLens<'_>, args: &RibArgs, no_update: bool) -> Res
     remove_existing_file(output_path)?;
 
     let mut sqlite_store = RibSqliteStore::new(path_to_str(output_path)?, true)?;
-    let summary = lens.reconstruct_snapshots(args, no_update, |rib_ts, state_store| {
-        sqlite_store.insert_snapshot(rib_ts, state_store)
-    })?;
+    let summary =
+        lens.reconstruct_snapshots(args, no_update, |rib_ts, state_store, filtered_updates| {
+            sqlite_store.insert_snapshot(rib_ts, state_store, filtered_updates)
+        })?;
     sqlite_store.finalize_indexes()?;
 
     eprintln!(
@@ -177,11 +186,11 @@ fn build_json_object(entry: &StoredRibEntry, fields: &[&str]) -> serde_json::Val
 
     for field in fields {
         let value = match *field {
-            "collector" => json!(entry.collector),
+            "collector" => json!(entry.collector.to_string()),
             "timestamp" => json!(entry.timestamp),
             "peer_ip" => json!(entry.peer_ip.to_string()),
             "peer_asn" => json!(entry.peer_asn),
-            "prefix" => json!(entry.prefix),
+            "prefix" => json!(entry.prefix.to_string()),
             "as_path" => entry
                 .as_path
                 .as_ref()
@@ -203,11 +212,11 @@ fn build_json_object(entry: &StoredRibEntry, fields: &[&str]) -> serde_json::Val
 
 fn entry_field_value(entry: &StoredRibEntry, field: &str) -> String {
     match field {
-        "collector" => entry.collector.clone(),
+        "collector" => entry.collector.to_string(),
         "timestamp" => TimestampFormat::Unix.format_timestamp(entry.timestamp),
         "peer_ip" => entry.peer_ip.to_string(),
         "peer_asn" => entry.peer_asn.to_string(),
-        "prefix" => entry.prefix.clone(),
+        "prefix" => entry.prefix.to_string(),
         "as_path" => entry.as_path.clone().unwrap_or_default(),
         "origin_asns" => entry.origin_asns_string().unwrap_or_default(),
         _ => String::new(),

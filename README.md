@@ -742,10 +742,52 @@ Behavior:
 - A single timestamp operand writes to stdout by default.
 - Stdout output is the reconstructed final route set, not an MRT/table-dump export.
 - Stdout follows the normal streaming formatter, so the default is `psv` unless `--format` or `--json` is provided.
-- Repeated timestamp operands require `--sqlite-path` and are written to one merged SQLite file keyed by `rib_ts`.
+- Repeated timestamp operands require `--sqlite-path` and are written to one merged SQLite file.
 - Providing `--sqlite-path` writes the reconstructed results to that SQLite file instead of stdout.
 - If any selected collector has no RIB at or before a requested `rib_ts`, the command aborts instead of producing a partial result.
 - `--country` uses local ASInfo registration data, and `--full-feed-only` keeps only peers with at least 800k IPv4 prefixes or 100k IPv6 prefixes in broker peer metadata.
+
+SQLite Output Schema:
+
+When using `--sqlite-path`, the output contains two tables:
+
+**`ribs` table** - Final reconstructed RIB states:
+```sql
+CREATE TABLE ribs (
+    rib_ts INTEGER NOT NULL,         -- Target RIB timestamp (the time you requested)
+    timestamp REAL NOT NULL,         -- Actual BGP message timestamp
+    collector TEXT NOT NULL,         -- Route collector name (e.g., 'rrc00')
+    peer_ip TEXT NOT NULL,           -- Peer IP address
+    peer_asn INTEGER NOT NULL,       -- Peer AS number
+    prefix TEXT NOT NULL,            -- Network prefix
+    path_id INTEGER,                 -- BGP path identifier (for add-path)
+    as_path TEXT,                    -- AS path string
+    origin_asns TEXT                 -- Origin AS numbers (space-separated)
+);
+```
+- Contains one row per (rib_ts, route) showing the final routing table state at each requested timestamp.
+- Query example: `SELECT * FROM ribs WHERE rib_ts = 1704067200 AND prefix = '1.1.1.0/24';`
+
+**`updates` table** - Filtered BGP updates (2nd and later RIBs only):
+```sql
+CREATE TABLE updates (
+    rib_ts INTEGER NOT NULL,         -- Target RIB timestamp this update contributed to
+    timestamp REAL NOT NULL,         -- When the update message was received
+    collector TEXT NOT NULL,         -- Route collector name
+    peer_ip TEXT NOT NULL,           -- Peer IP address
+    peer_asn INTEGER NOT NULL,       -- Peer AS number
+    prefix TEXT NOT NULL,            -- Network prefix
+    path_id INTEGER,                 -- BGP path identifier
+    as_path TEXT,                    -- AS path string
+    origin_asns TEXT,               -- Origin AS numbers
+    elem_type TEXT NOT NULL          -- 'ANNOUNCE' or 'WITHDRAW'
+);
+```
+- Contains filtered updates that were applied to build 2nd and later RIB snapshots.
+- **Not populated for the first/base RIB** (loaded directly from RIB dump file).
+- Shows the incremental changes between consecutive RIB states.
+- Useful for understanding what changed between snapshots.
+- Query example: `SELECT * FROM updates WHERE rib_ts = 1704090000 ORDER BY timestamp;`
 
 Examples:
 

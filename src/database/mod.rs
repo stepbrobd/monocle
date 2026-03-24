@@ -126,7 +126,7 @@ pub use monocle::{
 #[cfg(feature = "lib")]
 pub use session::MsgStore;
 #[cfg(feature = "lib")]
-pub use session::{RibRouteKey, RibSqliteStore, RibStateStore, StoredRibEntry};
+pub use session::{RibRouteKey, RibSqliteStore, RibStateStore, StoredRibEntry, StoredRibUpdate};
 
 // =============================================================================
 // Helper function
