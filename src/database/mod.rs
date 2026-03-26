@@ -125,6 +125,8 @@ pub use monocle::{
 // Requires lib feature because MsgStore depends on bgpkit_parser::BgpElem
 #[cfg(feature = "lib")]
 pub use session::MsgStore;
+#[cfg(feature = "lib")]
+pub use session::{RibRouteKey, RibSqliteStore, RibStateStore, StoredRibEntry, StoredRibUpdate};
 
 // =============================================================================
 // Helper function

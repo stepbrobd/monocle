@@ -21,6 +21,7 @@ See through all Border Gateway Protocol (BGP) data with a monocle.
   - [`monocle parse`](#monocle-parse)
     - [Output Format](#output-format)
   - [`monocle search`](#monocle-search)
+  - [`monocle rib`](#monocle-rib)
   - [`monocle time`](#monocle-time)
   - [`monocle inspect`](#monocle-inspect)
   - [`monocle country`](#monocle-country)
@@ -229,6 +230,7 @@ Subcommands:
 
 - `parse`: parse individual MRT files
 - `search`: search for matching messages from all available public MRT files
+- `rib`: reconstruct final RIB state at one or more arbitrary timestamps
 - `server`: start a WebSocket server for programmatic access
 - `inspect`: unified AS and prefix information lookup
 - `country`: utility to look up country name and code
@@ -259,6 +261,7 @@ Usage: monocle [OPTIONS] <COMMAND>
 Commands:
   parse    Parse individual MRT files given a file path, local or remote
   search   Search BGP messages from all available public MRT files
+  rib      Reconstruct final RIB state at one or more arbitrary timestamps
   server   Start the WebSocket server (ws://<address>:<port>/ws, health: http://<address>:<port>/health)
   inspect  Unified AS and prefix information lookup
   country  Country name and code lookup utilities
@@ -699,6 +702,110 @@ Use `--broker-files` to see the list of MRT files that would be queried without 
 ```text
 ➜  monocle search -t 2024-01-01T00:00:00Z -T 2024-01-01T01:00:00Z \
     -c rrc00 --broker-files
+```
+
+### `monocle rib`
+
+Reconstruct final RIB state at one or more arbitrary timestamps by loading the latest RIB at or before each requested `rib_ts` and replaying updates up to the exact timestamp.
+
+```text
+➜  monocle rib --help
+Reconstruct final RIB state at one or more arbitrary timestamps
+
+Usage: monocle rib [OPTIONS] <RIB_TS>...
+
+Arguments:
+  <RIB_TS>...  Target RIB timestamp operand. Repeat to request multiple snapshots
+
+Options:
+  -o, --origin-asn <ORIGIN_ASN>    Filter by origin AS Number(s), comma-separated. Prefix with ! to exclude
+  -C, --country <COUNTRY>          Filter by origin ASN registration country
+      --debug                      Print debug information
+      --format <FORMAT>            Output format: table, markdown, json, json-pretty, json-line, psv (default varies by command)
+  -p, --prefix <PREFIX>            Filter by network prefix(es), comma-separated. Prefix with ! to exclude
+      --json                       Output as JSON objects (shortcut for --format json-pretty)
+  -s, --include-super              Include super-prefixes when filtering
+      --no-update                  Disable automatic database updates (use existing cached data only)
+  -S, --include-sub                Include sub-prefixes when filtering
+  -J, --peer-asn <PEER_ASN>        Filter by peer ASN(s), comma-separated. Prefix with ! to exclude
+  -a, --as-path <AS_PATH>          Filter by AS path regex string
+  -c, --collector <COLLECTOR>      Filter by collector, e.g., rrc00 or route-views2
+  -P, --project <PROJECT>          Filter by route collection project, i.e. riperis or routeviews
+      --full-feed-only             Keep only full-feed peers based on broker peer metadata
+      --sqlite-path <SQLITE_PATH>  SQLite output file path
+  -h, --help                       Print help
+  -V, --version                    Print version
+```
+
+Behavior:
+
+- A single timestamp operand writes to stdout by default.
+- Stdout output is the reconstructed final route set, not an MRT/table-dump export.
+- Stdout follows the normal streaming formatter, so the default is `psv` unless `--format` or `--json` is provided.
+- Repeated timestamp operands require `--sqlite-path` and are written to one merged SQLite file.
+- Providing `--sqlite-path` writes the reconstructed results to that SQLite file instead of stdout.
+- If any selected collector has no RIB at or before a requested `rib_ts`, the command aborts instead of producing a partial result.
+- `--country` uses local ASInfo registration data, and `--full-feed-only` keeps only peers with at least 800k IPv4 prefixes or 100k IPv6 prefixes in broker peer metadata.
+
+SQLite Output Schema:
+
+When using `--sqlite-path`, the output contains two tables:
+
+**`ribs` table** - Final reconstructed RIB states:
+```sql
+CREATE TABLE ribs (
+    rib_ts INTEGER NOT NULL,         -- Target RIB timestamp (the time you requested)
+    timestamp REAL NOT NULL,         -- Actual BGP message timestamp
+    collector TEXT NOT NULL,         -- Route collector name (e.g., 'rrc00')
+    peer_ip TEXT NOT NULL,           -- Peer IP address
+    peer_asn INTEGER NOT NULL,       -- Peer AS number
+    prefix TEXT NOT NULL,            -- Network prefix
+    path_id INTEGER,                 -- BGP path identifier (for add-path)
+    as_path TEXT,                    -- AS path string
+    origin_asns TEXT                 -- Origin AS numbers (space-separated)
+);
+```
+- Contains one row per (rib_ts, route) showing the final routing table state at each requested timestamp.
+- Query example: `SELECT * FROM ribs WHERE rib_ts = 1704067200 AND prefix = '1.1.1.0/24';`
+
+**`updates` table** - Filtered BGP updates (2nd and later RIBs only):
+```sql
+CREATE TABLE updates (
+    rib_ts INTEGER NOT NULL,         -- Target RIB timestamp this update contributed to
+    timestamp REAL NOT NULL,         -- When the update message was received
+    collector TEXT NOT NULL,         -- Route collector name
+    peer_ip TEXT NOT NULL,           -- Peer IP address
+    peer_asn INTEGER NOT NULL,       -- Peer AS number
+    prefix TEXT NOT NULL,            -- Network prefix
+    path_id INTEGER,                 -- BGP path identifier
+    as_path TEXT,                    -- AS path string
+    origin_asns TEXT,               -- Origin AS numbers
+    elem_type TEXT NOT NULL          -- 'ANNOUNCE' or 'WITHDRAW'
+);
+```
+- Contains filtered updates that were applied to build 2nd and later RIB snapshots.
+- **Not populated for the first/base RIB** (loaded directly from RIB dump file).
+- Shows the incremental changes between consecutive RIB states.
+- Useful for understanding what changed between snapshots.
+- Query example: `SELECT * FROM updates WHERE rib_ts = 1704090000 ORDER BY timestamp;`
+
+Examples:
+
+```bash
+# Print the reconstructed RIB for a single timestamp to stdout
+monocle rib 2025-09-01T12:00:00Z -c rrc00 -o 13335
+
+# Write multiple timestamps to one merged SQLite file in the current directory
+monocle rib \
+  2025-09-01T12:00:00Z \
+  2025-09-01T18:00:00Z \
+  --sqlite-path /tmp/rrc00-us.sqlite3 \
+  -c rrc00 \
+  --country US \
+  --full-feed-only
+
+# Write a single reconstructed snapshot to SQLite
+monocle rib 2025-09-01T12:00:00Z --sqlite-path /tmp/route-views2.sqlite3 -c route-views2
 ```
 
 ### `monocle time`

@@ -1685,6 +1685,7 @@ dependencies = [
  "oneio",
  "radar-rs",
  "rayon",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

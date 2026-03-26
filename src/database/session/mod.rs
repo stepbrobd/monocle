@@ -15,6 +15,10 @@
 
 #[cfg(feature = "lib")]
 mod msg_store;
+#[cfg(feature = "lib")]
+mod rib_store;
 
 #[cfg(feature = "lib")]
 pub use msg_store::MsgStore;
+#[cfg(feature = "lib")]
+pub use rib_store::{RibRouteKey, RibSqliteStore, RibStateStore, StoredRibEntry, StoredRibUpdate};
